@@ -1,0 +1,11 @@
+{
+	"extends": ["html-validate:recommended", "html-validate:prettier"],
+	"rules": {
+		"doctype-style": ["error", { "style": "lowercase" }],
+		"void-style": "off",
+		"class-pattern": [
+			"warn",
+			{ "pattern": ["kebabcase", "snakecase", "camelcase", "bem"] }
+		]
+	}
+}

@@ -1,0 +1,49 @@
+#!/bin/sh
+# Ce script s'exécute AVANT une opération de rebase Git.
+
+# Le premier argument ($1) du hook pre-rebase est la branche sur laquelle vous rebasez.
+# Exemple: Si vous faites 'git rebase main', alors TARGET_BRANCH sera 'main'.
+TARGET_BRANCH="$1"
+
+# Si aucune branche cible n'est spécifiée (ex: 'git rebase' sans argument, ou rebase interactive),
+# ou si la branche cible n'a pas de branche distante configurée, nous sautons cette vérification.
+if [ -z "$TARGET_BRANCH" ]; then
+  echo "ℹ️  Aucune branche cible spécifique fournie pour le rebase. Vérification de l'état du distant ignorée pour la cible."
+  exit 0
+fi
+
+REMOTE_TARGET_BRANCH=$(git for-each-ref --format='%(upstream:short)' refs/heads/$TARGET_BRANCH 2>/dev/null)
+
+if [ -z "$REMOTE_TARGET_BRANCH" ]; then
+  echo "ℹ️  Aucune branche distante de suivi trouvée pour la branche cible '$TARGET_BRANCH'. Vérification de l'état du distant ignorée."
+  exit 0
+fi
+
+echo "🔍 Vérification de l'état de la branche cible '$TARGET_BRANCH' par rapport à son distant '$REMOTE_TARGET_BRANCH' avant le rebase..."
+
+# Récupère les dernières informations du distant sans afficher de sortie.
+# Cela permet de s'assurer que notre connaissance de l'état distant est à jour.
+REMOTE_NAME=$(echo "$REMOTE_TARGET_BRANCH" | cut -d'/' -f1)
+git fetch "$REMOTE_NAME" --quiet
+
+# Compare le hash de la branche cible locale avec celui de sa branche distante.
+LOCAL_TARGET_HASH=$(git rev-parse "$TARGET_BRANCH")
+REMOTE_TARGET_HASH=$(git rev-parse "$REMOTE_TARGET_BRANCH")
+BASE_HASH=$(git merge-base "$TARGET_BRANCH" "$REMOTE_TARGET_HASH") # Attention, ici c'est REMOTE_TARGET_HASH pour la comparaison de base
+
+if [ "$LOCAL_TARGET_HASH" = "$REMOTE_TARGET_HASH" ]; then
+  echo "✅ La branche cible '$TARGET_BRANCH' est à jour avec '$REMOTE_TARGET_BRANCH'. Rebase autorisé."
+  exit 0
+elif [ "$LOCAL_TARGET_HASH" = "$BASE_HASH" ]; then
+  echo "❌ Erreur : La branche cible '$TARGET_BRANCH' est EN RETARD par rapport à son distant '$REMOTE_TARGET_BRANCH'."
+  echo "   Veuillez mettre à jour '$TARGET_BRANCH' (par exemple, en exécutant 'git checkout $TARGET_BRANCH && git pull') avant de rebaser dessus."
+  echo "   Rebase annulé."
+  exit 1 # Indique une erreur pour annuler l'opération Git
+else
+  # Cas où la branche locale est en avance ou a divergé.
+  # L'objectif principal est d'empêcher les rebases sur des branches "pas à jour" (en retard).
+  # Pour les autres cas (en avance ou divergé), nous permettons le rebase mais affichons un avertissement.
+  echo "⚠️  La branche cible '$TARGET_BRANCH' n'est pas parfaitement synchronisée avec '$REMOTE_TARGET_BRANCH' (elle est en avance ou a divergé)."
+  echo "   Rebase autorisé, mais considérez la mettre à jour pour un historique plus propre."
+  exit 0
+fi
