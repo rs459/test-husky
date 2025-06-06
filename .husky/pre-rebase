@@ -1,49 +1,79 @@
 #!/bin/sh
-# Ce script s'exécute AVANT une opération de rebase Git.
+#
+# Ce hook pre-rebase vérifie que la branche cible du rebase est à jour
+# avec son équivalent distant. Si ce n'est pas le cas, il demande
+# à l'utilisateur s'il veut continuer ou annuler pour mettre à jour.
+#
 
-# Le premier argument ($1) du hook pre-rebase est la branche sur laquelle vous rebasez.
-# Exemple: Si vous faites 'git rebase main', alors TARGET_BRANCH sera 'main'.
-TARGET_BRANCH="$1"
+set -e # Sortir immédiatement si une commande échoue
 
-# Si aucune branche cible n'est spécifiée (ex: 'git rebase' sans argument, ou rebase interactive),
-# ou si la branche cible n'a pas de branche distante configurée, nous sautons cette vérification.
+TARGET_BRANCH="$1" # La branche cible du rebase (e.g., 'main')
+
+echo "--- Exécution du hook pre-rebase ---"
+
+# Vérifier si une branche cible est fournie (pour ignorer les 'rebase --continue', etc.)
 if [ -z "$TARGET_BRANCH" ]; then
-  echo "ℹ️  Aucune branche cible spécifique fournie pour le rebase. Vérification de l'état du distant ignorée pour la cible."
-  exit 0
+  echo "ℹ️  Aucune branche cible spécifique fournie pour le rebase (e.g., 'git rebase --continue' ou 'git rebase --abort')."
+  echo "    Le hook n'effectue pas de vérification de synchronisation distante dans ce cas."
+  exit 0 # Autoriser l'opération car ce n'est pas un rebase initial sur une branche cible.
 fi
 
-REMOTE_TARGET_BRANCH=$(git for-each-ref --format='%(upstream:short)' refs/heads/$TARGET_BRANCH 2>/dev/null)
+# Déterminer la branche distante correspondante
+REMOTE_TARGET_BRANCH=$(git for-each-ref --format='%(upstream:short)' refs/heads/"$TARGET_BRANCH" 2>/dev/null)
 
 if [ -z "$REMOTE_TARGET_BRANCH" ]; then
-  echo "ℹ️  Aucune branche distante de suivi trouvée pour la branche cible '$TARGET_BRANCH'. Vérification de l'état du distant ignorée."
+  echo "ℹ️  Aucune branche distante de suivi trouvée pour la branche cible '$TARGET_BRANCH'."
+  echo "    Impossible de vérifier la synchronisation. Rebase autorisé."
   exit 0
 fi
 
-echo "🔍 Vérification de l'état de la branche cible '$TARGET_BRANCH' par rapport à son distant '$REMOTE_TARGET_BRANCH' avant le rebase..."
-
-# Récupère les dernières informations du distant sans afficher de sortie.
-# Cela permet de s'assurer que notre connaissance de l'état distant est à jour.
+# Récupérer les dernières informations du dépôt distant
+echo "🔍 Récupération des dernières informations du dépôt distant pour '$REMOTE_TARGET_BRANCH'..."
 REMOTE_NAME=$(echo "$REMOTE_TARGET_BRANCH" | cut -d'/' -f1)
-git fetch "$REMOTE_NAME" --quiet
+git fetch "$REMOTE_NAME" --quiet || {
+    echo "❌ Erreur lors de la récupération des informations du dépôt distant '$REMOTE_NAME'."
+    echo "    Veuillez vérifier votre connexion ou les permissions. Rebase annulé."
+    exit 1
+}
+echo "✅ Références distantes mises à jour."
 
-# Compare le hash de la branche cible locale avec celui de sa branche distante.
-LOCAL_TARGET_HASH=$(git rev-parse "$TARGET_BRANCH")
-REMOTE_TARGET_HASH=$(git rev-parse "$REMOTE_TARGET_BRANCH")
-BASE_HASH=$(git merge-base "$TARGET_BRANCH" "$REMOTE_TARGET_HASH") # Attention, ici c'est REMOTE_TARGET_HASH pour la comparaison de base
+# Comparer les hashes
+LOCAL_TARGET_HASH=$(git rev-parse "refs/heads/$TARGET_BRANCH")
+REMOTE_TARGET_HASH=$(git rev-parse "refs/remotes/$REMOTE_TARGET_BRANCH")
+BASE_HASH=$(git merge-base "refs/heads/$TARGET_BRANCH" "refs/remotes/$REMOTE_TARGET_BRANCH")
+
 
 if [ "$LOCAL_TARGET_HASH" = "$REMOTE_TARGET_HASH" ]; then
-  echo "✅ La branche cible '$TARGET_BRANCH' est à jour avec '$REMOTE_TARGET_BRANCH'. Rebase autorisé."
-  exit 0
-elif [ "$LOCAL_TARGET_HASH" = "$BASE_HASH" ]; then
-  echo "❌ Erreur : La branche cible '$TARGET_BRANCH' est EN RETARD par rapport à son distant '$REMOTE_TARGET_BRANCH'."
-  echo "   Veuillez mettre à jour '$TARGET_BRANCH' (par exemple, en exécutant 'git checkout $TARGET_BRANCH && git pull') avant de rebaser dessus."
-  echo "   Rebase annulé."
-  exit 1 # Indique une erreur pour annuler l'opération Git
+  # La branche locale est parfaitement à jour.
+  echo "✅ La branche cible '$TARGET_BRANCH' est à jour avec '$REMOTE_TARGET_BRANCH'."
+  echo "    Rebase autorisé."
+  exit 0 # Succès
 else
-  # Cas où la branche locale est en avance ou a divergé.
-  # L'objectif principal est d'empêcher les rebases sur des branches "pas à jour" (en retard).
-  # Pour les autres cas (en avance ou divergé), nous permettons le rebase mais affichons un avertissement.
-  echo "⚠️  La branche cible '$TARGET_BRANCH' n'est pas parfaitement synchronisée avec '$REMOTE_TARGET_BRANCH' (elle est en avance ou a divergé)."
-  echo "   Rebase autorisé, mais considérez la mettre à jour pour un historique plus propre."
-  exit 0
+  # La branche n'est PAS à jour. Informer l'utilisateur et demander son choix.
+  echo "--- ATTENTION : Votre branche '$TARGET_BRANCH' n'est PAS à jour avec '$REMOTE_TARGET_BRANCH' ---"
+
+  if [ "$LOCAL_TARGET_HASH" = "$BASE_HASH" ]; then
+    echo "    (Elle est en retard : '$REMOTE_TARGET_BRANCH' a des commits que votre '$TARGET_BRANCH' n'a pas.)"
+  elif [ "$REMOTE_TARGET_HASH" = "$BASE_HASH" ]; then
+    echo "    (Elle est en avance : Votre '$TARGET_BRANCH' a des commits non poussés sur '$REMOTE_TARGET_BRANCH'.)"
+  else
+    echo "    (Elle a divergé : Il y a des commits locaux et distants que l'autre n'a pas.)"
+  fi
+
+  echo "----------------------------------------------------------------------------------"
+  echo "Il est FORTEMENT RECOMMANDÉ de mettre à jour votre branche '$TARGET_BRANCH'"
+  echo "avant de rebaser dessus (par exemple, en exécutant 'git checkout $TARGET_BRANCH && git pull')."
+  echo "----------------------------------------------------------------------------------"
+
+  # Demander à l'utilisateur s'il veut continuer
+  read -p "Voulez-vous annuler le rebase pour mettre à jour la branche ? (y/N) " -n 1 -r REPLY
+  echo # (pour un retour à la ligne après la saisie)
+
+  if [[ $REPLY =~ ^[Yy]$ ]]; then
+    echo "Rebase annulé par l'utilisateur. Veuillez mettre à jour '$TARGET_BRANCH' et réessayer."
+    exit 1 # L'utilisateur a choisi d'annuler.
+  else
+    echo "Rebase continué à la demande de l'utilisateur. Soyez conscient des conséquences."
+    exit 0 # L'utilisateur a choisi de continuer.
+  fi
 fi
